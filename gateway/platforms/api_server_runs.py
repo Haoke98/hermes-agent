@@ -24,6 +24,7 @@ except ImportError:
     # would reset the already-imported ``web`` to None (500 on POST /v1/runs).
     RequestKey = None  # type: ignore[assignment,misc]
 
+from agent.turn_failure_copy import is_max_iteration_handoff
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 
@@ -182,16 +183,33 @@ def terminal_run_status(result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Map a ``run_conversation`` result to its terminal run status and the wire fields every
     terminal event/status carries. An interrupted turn is ``cancelled``; a turn that ended
     without finishing (``failed``, ``partial``, or ``completed=False`` such as the iteration
-    budget) is ``failed``, so ``completed: true`` never rides next to ``partial: true``."""
+    budget) is ``failed``, so ``completed: true`` never rides next to ``partial: true``.
+
+    One ``completed=False`` shape is deliberately *not* a failure: a max-iteration handoff, where
+    the turn budget ran out but the turn still closed with a usable summary
+    (:func:`agent.turn_failure_copy.is_max_iteration_handoff`; #102213). Cron delivery and the TUI
+    goal judge already treat that as a resumable boundary. Flattening it to ``failed`` here made
+    every ``/v1/runs`` client report a hard failure and discard the summary, which already rides
+    the terminal frame as ``output``. A handoff is reported as ``completed`` plus an explicit
+    ``handoff`` marker, so a client can still tell it apart from a turn that finished in budget.
+    """
     interrupted = bool(result.get("interrupted"))
-    finished = (
-        not interrupted and not result.get("failed") and not result.get("partial")
+    partial = bool(result.get("partial"))
+    handoff = (
+        not interrupted and not partial and not result.get("failed")
+        and is_max_iteration_handoff(result)
+    )
+    finished = handoff or (
+        not interrupted and not partial and not result.get("failed")
         and result.get("completed") is not False
     )
     status = "cancelled" if interrupted else "completed" if finished else "failed"
     fields: dict[str, Any] = {
-        "completed": finished, "partial": bool(result.get("partial")), "interrupted": interrupted,
+        "completed": finished, "partial": partial, "interrupted": interrupted,
     }
+    if handoff:
+        fields["handoff"] = True
+        fields["handoff_reason"] = str(result.get("turn_exit_reason") or "")
     if not finished and result.get("turn_exit_reason"):
         fields["turn_exit_reason"] = str(result["turn_exit_reason"])
     if result.get("pending_steer"):
