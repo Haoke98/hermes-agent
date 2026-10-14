@@ -107,6 +107,28 @@ def clear_stale_git_locks(repo_root: Path, *, min_age_seconds: Optional[int] = N
     )
 
 
+def clear_stale_index_lock(index_file: Path, *, min_age_seconds: Optional[int] = None) -> bool:
+    """Remove a stale ``<index_file>.lock``; returns whether one was removed.
+
+    The checkpoint store is a *bare* repo with one index per project (``indexes/<hash16>``), so
+    ``clear_stale_git_locks`` — which resolves a checkout's ``.git/`` — never sees these locks. A
+    snapshot git killed for exceeding its timeout leaves the lock behind, and git then refuses
+    every later stage for that project with "Unable to create '…lock': File exists", permanently:
+    git never removes a lock it did not take. The store is shared, so one wedged project also
+    keeps ``git gc`` and ``prune`` failing.
+
+    Same contract as the other sweeps: only when older than the age floor AND no git process is
+    running. Never raises.
+    """
+    lock = Path(f"{index_file}.lock")
+    return bool(_sweep_stale(
+        lock.parent, lambda: [lock],
+        min_age_seconds=min_age_seconds, default_age=STALE_LOCK_MIN_AGE_SECONDS,
+        skip_msg="git process running; skipping stale index-lock sweep",
+        log_removed=lambda p, _size: logger.info("Removed stale index lock %s", p),
+    ))
+
+
 def release_dead_index_lock(repo_root: Path) -> bool:
     """Drop ``.git/index.lock`` when the git that took it is proven gone, whatever its age.
 

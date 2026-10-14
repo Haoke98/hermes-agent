@@ -60,7 +60,7 @@ import time
 from pathlib import Path, PurePosixPath
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import selected_git_env, windows_hide_flags
-from hermes_cli.gitlock import clear_stale_tmp_packs
+from hermes_cli.gitlock import clear_stale_index_lock, clear_stale_tmp_packs
 from typing import Dict, List, Optional, Set, Tuple
 
 from utils import env_int, rmtree_readonly
@@ -1434,6 +1434,11 @@ class CheckpointManager:
         dir_hash = _project_hash(working_dir)
         index_file = _index_path(store, dir_hash)
         ref = _ref_name(dir_hash)
+
+        # A stage that exceeded its timeout is killed holding the index lock, and git then
+        # refuses every later snapshot for this project with "File exists" forever after.
+        # Reclaim it before staging, or one slow turn wedges this project permanently.
+        clear_stale_index_lock(index_file)
 
         # Seed the per-project index from the last checkpoint, if any, so the
         # diff/commit machinery sees only changes since then.  On first call,
